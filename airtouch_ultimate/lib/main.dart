@@ -1,28 +1,23 @@
 import 'dart:async';
-import 'dart:io';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:camera/camera.dart';
-import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:vibration/vibration.dart';
 
-// ==========================================
-// CRASH-PROOF AIRTOUCH ULTIMATE v5.0
-// Android 16+ Compliant
-// Defensive Initialization Pattern
-// ==========================================
-
 void main() {
+  // Ensure Flutter binding is initialized
   WidgetsFlutterBinding.ensureInitialized();
   
+  // Set error handler
   FlutterError.onError = (FlutterErrorDetails details) {
     debugPrint('Flutter Error: ${details.exception}');
   };
   
-  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  // Set preferred orientations
+  SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+  ]);
   
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
@@ -36,6 +31,8 @@ void main() {
   }, (error, stackTrace) {
     debugPrint('Uncaught error: $error');
   });
+}
+
 }
 
 class AirTouchUltimateApp extends StatelessWidget {
@@ -68,80 +65,90 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
-  static const _controlChannel = MethodChannel('com.airtouch.ultimate/control');
+  static const _methodChannel = MethodChannel('com.airtouch.ultimate/control');
+  static const _eventChannel = EventChannel('com.airtouch.ultimate/events')
   
-  CameraController? _cameraController;
-  bool _isCameraInitialized = false;
-  List<CameraDescription> _cameras = [];
-  
-  PoseDetector? _poseDetector;
-  bool _isPoseDetectorInitialized = false;
-  
+  // State
   bool _isTracking = false;
   bool _isInitializing = false;
+  bool _hasPermissions = false;
   
-  bool _hasCameraPermission = false;
-  bool _canDrawOverlays = false;
-  bool _hasAccessibility = false;
+  // Cursor position (normalized 0-1)
+  double _cursorX = 00.5;
+  double _cursorY = 00.5;
+  String _gesture = 'none';
+  double _fps = 0;
   
-  Offset _cursorPosition = const Offset(0.5, 0.5);
-  String _currentGesture = 'none';
+  // Event sink
+  EventChannel.EventSink? _eventSink;
   
-  Size _screenSize = const Size(1080, 2400);
-  int _cameraWidth = 480;
-  int _cameraHeight = 640;
+  // Stream subscription
+  StreamSubscription<dynamic>? _eventSubscription;
   
-  String? _errorMessage;
-  
-  int _frameCount = 0;
-  DateTime _lastFpsUpdate = DateTime.now();
-  double _currentFps = 0;
-  
-  double _smoothedX = 0.5;
-  double _smoothedY = 0.5;
-  static const _smoothingAlpha = 0.25;
-  
-  DateTime _lastGestureTime = DateTime.now();
-  static const _gestureDebounceMs = 300;
-
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _checkPermissionStatus();
-    _enableWakelock();
+    
+    // Check permissions without checking
+    _checkPermissions();
+    
+    // Enable wakelock
+    WakelockPlus.enable();
+    
+    // Listen to event channel
+    _eventSubscription = _eventChannel.receiveBroadcastStream.listen((event) {
+      if (event is Map) {
+        final type = event['type'];
+        if (type == 'position') {
+          setState(() {
+            _cursorX = (event['x'] as num?) ?? 0.5;
+            _cursorY = (event['y'] as num?) ?? 0.5;
+          });
+        } else if (type == 'gesture') {
+          setState(() {
+            _gesture = event['gesture'] as String? ?? 'none';
+          });
+        } else if (type == 'fps') {
+          setState(() {
+            _fps = (event['fps'] as num?) ?? 0;
+          });
+        }
+      }
+    });
   }
   
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _checkPermissionStatus();
+      _checkPermissions();
     }
   }
-
-  Future<void> _checkPermissionStatus() async {
+  
+  Future<void> _checkPermissions() async {
     try {
+      // Check camera
       final cameraStatus = await Permission.camera.status;
       
-      bool canDraw = false;
+      // Check overlay
+      bool canDrawOverlays = false;
       try {
-        canDraw = await _controlChannel.invokeMethod('canDrawOverlays') ?? false;
+        canDrawOverlays = await _methodChannel.invokeMethod('canDrawOverlays') ?? false;
       } catch (e) {
         debugPrint('Overlay check error: $e');
       }
       
+      // Check accessibility
       bool hasAccessibility = false;
       try {
-        hasAccessibility = await _controlChannel.invokeMethod('isAccessibilityEnabled') ?? false;
+        hasAccessibility = await _methodChannel.invokeMethod('isAccessibilityEnabled') ?? false;
       } catch (e) {
         debugPrint('Accessibility check error: $e');
       }
       
       if (mounted) {
         setState(() {
-          _hasCameraPermission = cameraStatus.isGranted;
-          _canDrawOverlays = canDraw;
-          _hasAccessibility = hasAccessibility;
+          _hasPermissions = cameraStatus.isGranted && canDrawOverlays && hasAccessibility;
         });
       }
     } catch (e) {
@@ -149,207 +156,65 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
   }
   
-  Future<bool> _requestAllPermissions() async {
-    try {
-      final cameraStatus = await Permission.camera.request();
-      if (!cameraStatus.isGranted) {
-        _showError('Camera permission is required');
-        return false;
-      }
-      
-      try {
-        final canDraw = await _controlChannel.invokeMethod('canDrawOverlays') ?? false;
-        if (!canDraw) {
-          await _controlChannel.invokeMethod('requestOverlayPermission');
-          await Future.delayed(const Duration(milliseconds: 500));
-          
-          final nowCanDraw = await _controlChannel.invokeMethod('canDrawOverlays') ?? false;
-          if (!nowCanDraw) {
-            _showError('Overlay permission is required for cursor display');
-            return false;
-          }
-        }
-      } catch (e) {
-        debugPrint('Overlay permission error: $e');
-      }
-      
-      try {
-        final hasAccessibility = await _controlChannel.invokeMethod('isAccessibilityEnabled') ?? false;
-        if (!hasAccessibility) {
-          _showError('Please enable Accessibility Service for clicking');
-          await _controlChannel.invokeMethod('openAccessibilitySettings');
-          return false;
-        }
-      } catch (e) {
-        debugPrint('Accessibility check error: $e');
-      }
-      
-      await _checkPermissionStatus();
-      return _hasCameraPermission && _canDrawOverlays && _hasAccessibility;
-    } catch (e) {
-      _showError('Permission request failed: $e');
-      return false;
-    }
-  }
-
-  Future<bool> _initializeCamera() async {
-    if (_cameraController != null && _isCameraInitialized) return true;
-    
-    try {
-      debugPrint('Initializing camera...');
-      
-      _cameras = await availableCameras();
-      if (_cameras.isEmpty) {
-        _showError('No camera found on this device');
-        return false;
-      }
-      
-      CameraDescription? frontCamera;
-      for (final camera in _cameras) {
-        if (camera.lensDirection == CameraLensDirection.front) {
-          frontCamera = camera;
-          break;
-        }
-      }
-      frontCamera ??= _cameras.first;
-      
-      _cameraController = CameraController(
-        frontCamera,
-        ResolutionPreset.medium,
-        enableAudio: false,
-        imageFormatGroup: Platform.isAndroid 
-            ? ImageFormatGroup.nv21 
-            : ImageFormatGroup.bgra8888,
-      );
-      
-      await _cameraController!.initialize();
-      
-      final size = _cameraController!.value.previewSize;
-      if (size != null) {
-        _cameraWidth = size.width.toInt();
-        _cameraHeight = size.height.toInt();
-      }
-      
-      if (mounted) setState(() => _isCameraInitialized = true);
-      
-      debugPrint('Camera initialized: ${_cameraWidth}x$_cameraHeight');
-      return true;
-    } catch (e) {
-      _showError('Camera initialization failed: $e');
-      _cameraController?.dispose();
-      _cameraController = null;
-      _isCameraInitialized = false;
-      return false;
-    }
-  }
-  
-  Future<void> _disposeCamera() async {
-    try {
-      if (_cameraController != null) {
-        if (_cameraController!.value.isStreamingImages) {
-          await _cameraController!.stopImageStream();
-        }
-        await _cameraController!.dispose();
-        _cameraController = null;
-        _isCameraInitialized = false;
-      }
-    } catch (e) {
-      debugPrint('Camera dispose error: $e');
-    }
-  }
-
-  Future<bool> _initializePoseDetector() async {
-    if (_poseDetector != null && _isPoseDetectorInitialized) return true;
-    
-    try {
-      debugPrint('Initializing pose detector...');
-      
-      final options = PoseDetectorOptions(
-        mode: PoseDetectionMode.stream,
-        model: PoseDetectionModel.base,
-      );
-      
-      _poseDetector = PoseDetector(options: options);
-      _isPoseDetectorInitialized = true;
-      
-      debugPrint('Pose detector initialized');
-      return true;
-    } catch (e) {
-      _showError('ML Kit initialization failed: $e');
-      _poseDetector?.close();
-      _poseDetector = null;
-      _isPoseDetectorInitialized = false;
-      return false;
-    }
-  }
-  
-  Future<void> _disposePoseDetector() async {
-    try {
-      _poseDetector?.close();
-      _poseDetector = null;
-      _isPoseDetectorInitialized = false;
-    } catch (e) {
-      debugPrint('Pose detector dispose error: $e');
-    }
-  }
-
   Future<void> _startTracking() async {
-    if (_isInitializing || _isTracking) return;
+    if (_isTracking || _isInitializing) return;
     
     setState(() {
       _isInitializing = true;
-      _errorMessage = null;
     });
     
     try {
-      debugPrint('=== STARTING TRACKING ===');
+      debugPrint('=== Starting Tracking ===');
       
-      final hasPermissions = await _requestAllPermissions();
-      if (!hasPermissions) {
-        debugPrint('Permissions not granted');
-        if (mounted) setState(() => _isInitializing = false);
+      // Request permissions if needed
+      if (!await Permission.camera.request().isGranted) {
+        _showError('Camera permission required');
+        setState(() => _isInitializing = false);
         return;
       }
       
-      final cameraReady = await _initializeCamera();
-      if (!cameraReady) {
-        if (mounted) setState(() => _isInitializing = false);
+      // Check overlay permission
+      bool canDraw = await _methodChannel.invokeMethod('canDrawOverlays') ?? false;
+      if (!canDraw) {
+        await _methodChannel.invokeMethod('requestOverlayPermission');
+        await Future.delayed(const Duration(milliseconds: 500));
+        canDraw = await _methodChannel.invokeMethod('canDrawOverlays') ?? false;
+        if (!canDraw) {
+          _showError('Overlay permission required');
+          setState(() => _isInitializing = false);
+          return;
+        }
+      }
+      
+      // Check accessibility
+      bool hasAccess = await _methodChannel.invokeMethod('isAccessibilityEnabled') ?? false;
+      if (!hasAccess) {
+        await _methodChannel.invokeMethod('openAccessibilitySettings');
+        setState(() => _isInitializing = false);
         return;
       }
       
-      final detectorReady = await _initializePoseDetector();
-      if (!detectorReady) {
-        await _disposeCamera();
-        if (mounted) setState(() => _isInitializing = false);
-        return;
+      // Start native tracking
+      final result = await _methodChannel.invokeMethod('startTracking');
+      
+      if (result == true) {
+        debugPrint('=== Tracking Started ===');
+        if (mounted) {
+          setState(() {
+            _isTracking = true;
+            _isInitializing = false;
+          });
+        }
+        _vibrate();
+      } else {
+        _showError('Failed to start tracking');
+        setState(() => _isInitializing = false);
       }
       
-      try {
-        await _controlChannel.invokeMethod('showOverlay');
-      } catch (e) {
-        debugPrint('Overlay error: $e');
-      }
-      
-      if (_cameraController != null && 
-          _cameraController!.value.isInitialized &&
-          !_cameraController!.value.isStreamingImages) {
-        await _cameraController!.startImageStream(_processCameraImage);
-      }
-      
-      debugPrint('=== TRACKING STARTED ===');
-      
-      if (mounted) {
-        setState(() {
-          _isTracking = true;
-          _isInitializing = false;
-        });
-      }
-      
-      _vibrate();
     } catch (e) {
       debugPrint('Start tracking error: $e');
-      _showError('Failed to start: $e');
-      if (mounted) setState(() => _isInitializing = false);
+      _showError('Error: $e');
+      setState(() => _isInitializing = false);
     }
   }
   
@@ -357,172 +222,21 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     if (!_isTracking) return;
     
     try {
-      debugPrint('=== STOPPING TRACKING ===');
+      debugPrint('=== Stopping Tracking ===');
       
-      await _disposeCamera();
-      
-      try {
-        await _controlChannel.invokeMethod('hideOverlay');
-      } catch (e) {
-        debugPrint('Hide overlay error: $e');
-      }
-      
-      await _disposePoseDetector();
-      
-      if (mounted) setState(() => _isTracking = false);
-      
-      _vibrate();
-      debugPrint('=== TRACKING STOPPED ===');
-    } catch (e) {
-      debugPrint('Stop tracking error: $e');
-      _showError('Error stopping: $e');
-    }
-  }
-
-  void _processCameraImage(CameraImage image) {
-    if (!_isTracking) return;
-    
-    _frameCount++;
-    final now = DateTime.now();
-    if (now.difference(_lastFpsUpdate).inMilliseconds >= 1000) {
-      if (mounted) setState(() => _currentFps = _frameCount.toDouble());
-      _frameCount = 0;
-      _lastFpsUpdate = now;
-    }
-    
-    try {
-      final inputImage = _convertToInputImage(image);
-      if (inputImage == null || _poseDetector == null) return;
-      
-      _poseDetector!.processImage(inputImage).then((poses) {
-        if (poses.isEmpty || !_isTracking) return;
-        _handlePose(poses.first);
-      }).catchError((e) {
-        debugPrint('Pose processing error: $e');
-      });
-    } catch (e) {
-      debugPrint('Image processing error: $e');
-    }
-  }
-  
-  InputImage? _convertToInputImage(CameraImage image) {
-    try {
-      final camera = _cameraController?.description;
-      if (camera == null) return null;
-      
-      final rotation = InputImageRotationValue.fromRawValue(camera.sensorOrientation);
-      if (rotation == null) return null;
-      
-      final format = InputImageFormatValue.fromRawValue(image.format.raw);
-      if (format == null) return null;
-      
-      final plane = image.planes.first;
-      
-      return InputImage.fromBytes(
-        bytes: plane.bytes,
-        metadata: InputImageMetadata(
-          size: Size(image.width.toDouble(), image.height.toDouble()),
-          rotation: rotation,
-          format: format,
-          bytesPerRow: plane.bytesPerRow,
-        ),
-      );
-    } catch (e) {
-      debugPrint('InputImage conversion error: $e');
-      return null;
-    }
-  }
-
-  void _handlePose(Pose pose) {
-    try {
-      final indexTip = pose.landmarks[PoseLandmarkType.rightIndex];
-      final thumbTip = pose.landmarks[PoseLandmarkType.rightThumb];
-      final wrist = pose.landmarks[PoseLandmarkType.rightWrist];
-      
-      if (indexTip == null) return;
-      
-      final cameraW = _cameraWidth.toDouble();
-      final cameraH = _cameraHeight.toDouble();
-      
-      double normalizedX = (indexTip.x / cameraW).clamp(0.0, 1.0);
-      double normalizedY = (indexTip.y / cameraH).clamp(0.0, 1.0);
-      
-      _smoothedX = _smoothingAlpha * normalizedX + (1 - _smoothingAlpha) * _smoothedX;
-      _smoothedY = _smoothingAlpha * normalizedY + (1 - _smoothingAlpha) * _smoothedY;
+      await _methodChannel.invokeMethod('stopTracking');
       
       if (mounted) {
         setState(() {
-          _cursorPosition = Offset(_smoothedX, _smoothedY);
+          _isTracking = false;
         });
       }
       
-      _controlChannel.invokeMethod('updateCursorPosition', {
-        'x': _smoothedX,
-        'y': _smoothedY,
-      }).catchError((e) {
-        debugPrint('Cursor update error: $e');
-      });
-      
-      if (thumbTip != null && wrist != null) {
-        _detectGestures(indexTip, thumbTip, wrist);
-      }
-    } catch (e) {
-      debugPrint('Pose handling error: $e');
-    }
-  }
-  
-  void _detectGestures(PoseLandmark indexTip, PoseLandmark thumbTip, PoseLandmark wrist) {
-    final now = DateTime.now();
-    if (now.difference(_lastGestureTime).inMilliseconds < _gestureDebounceMs) return;
-    
-    try {
-      final pinchDistance = _calculateDistance(indexTip, thumbTip);
-      final pinchThreshold = (_cameraWidth * 0.1).toDouble();
-      
-      if (pinchDistance < pinchThreshold) {
-        if (_currentGesture != 'pinch') {
-          _lastGestureTime = now;
-          if (mounted) setState(() => _currentGesture = 'pinch');
-          _performClick();
-        }
-        return;
-      }
-      
-      if (_currentGesture != 'open') {
-        if (mounted) setState(() => _currentGesture = 'open');
-      }
-    } catch (e) {
-      debugPrint('Gesture detection error: $e');
-    }
-  }
-  
-  double _calculateDistance(PoseLandmark a, PoseLandmark b) {
-    final dx = a.x - b.x;
-    final dy = a.y - b.y;
-    return math.sqrt(dx * dx + dy * dy);
-  }
-  
-  Future<void> _performClick() async {
-    try {
-      final screenX = _smoothedX * _screenSize.width;
-      final screenY = _smoothedY * _screenSize.height;
-      
-      await _controlChannel.invokeMethod('performClick', {
-        'x': screenX,
-        'y': screenY,
-      });
-      
       _vibrate();
+      debugPrint('=== Tracking Stopped ===');
+      
     } catch (e) {
-      debugPrint('Click error: $e');
-    }
-  }
-
-  Future<void> _enableWakelock() async {
-    try {
-      await WakelockPlus.enable();
-    } catch (e) {
-      debugPrint('Wakelock error: $e');
+      debugPrint('Stop tracking error: $e');
     }
   }
   
@@ -537,7 +251,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void _showError(String message) {
     debugPrint('ERROR: $message');
     if (mounted) {
-      setState(() => _errorMessage = message);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(message),
@@ -548,34 +261,47 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       );
     }
   }
-
+  
   @override
   void dispose() {
     debugPrint('MainScreen dispose');
-    if (_isTracking) _stopTracking();
-    _disposeCamera();
-    _disposePoseDetector();
+    if (_isTracking) {
+      _stopTracking();
+    }
     try {
       WakelockPlus.disable();
     } catch (e) {}
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
-
+  
+  // ==========================================
+  // UI
+  // ==========================================
+  
   @override
   Widget build(BuildContext context) {
-    _screenSize = MediaQuery.of(context).size;
-    
     return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            _buildHeader(),
-            Expanded(
-              child: _isTracking ? _buildTrackingView() : _buildStartView(),
-            ),
-            _buildControls(),
-          ],
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            colors: [
+              const Color(0xFF1a1a2e),
+              const Color(0xFF0a0A1A),
+            ],
+          ),
+        ),
+        child: SafeArea(
+          child: Column(
+            children: [
+              _buildHeader(),
+              Expanded(
+                child: _isTracking ? _buildTrackingView() : _buildStartView(),
+              ),
+              _buildControls(),
+            ],
+          ),
         ),
       ),
     );
@@ -589,7 +315,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           Container(
             width: 48,
             height: 48,
-            decoration: BoxDecoration(borderRadius: BorderRadius.circular(12)),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF6C63FF).withOpacity(0.3),
+                  blurRadius: 8,
+                ),
+              ],
+            ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(12),
               child: Image.asset(
@@ -597,40 +331,65 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 fit: BoxFit.cover,
                 errorBuilder: (_, __, ___) => Container(
                   color: const Color(0xFF6C63FF),
-                  child: const Icon(Icons.back_hand_rounded, color: Colors.white),
+                  child: const Icon(Icons.back_hand, color: Colors.white),
                 ),
               ),
             ),
           ),
+          ),
           const SizedBox(width: 12),
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('AirTouch Ultimate', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
-                Text('Hand Gesture Controller v5.0', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const Text(
+                  'AirTouch Ultimate',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+                Text(
+                  'Hand Gesture Controller v5.1',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.white54,
+                  ),
+                ),
               ],
             ),
           ),
-          _buildStatusIndicator(),
-        ],
-      ),
-    );
-  }
-  
-  Widget _buildStatusIndicator() {
-    Color color = _isTracking ? Colors.green : (_isInitializing ? Colors.orange : Colors.grey);
-    String text = _isTracking ? 'Active' : (_isInitializing ? 'Starting...' : 'Stopped');
-    
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(color: color.withOpacity(0.2), borderRadius: BorderRadius.circular(20)),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-          const SizedBox(width: 6),
-          Text(text, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600)),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: (_isTracking ? Colors.green : (_isInitializing ? Colors.orange : Colors.white24))
+                  .withOpacity(0.2),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: _isTracking ? Colors.green : (_isInitializing ? Colors.orange : Colors.white24),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  _isTracking ? 'ACTIVE' : (_isInitializing ? 'STARTING...' : 'STOPPED'),
+                  style: TextStyle(
+                    color: _isTracking ? Colors.green : (_isInitializing ? Colors.orange : Colors.white24),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -644,35 +403,45 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Container(
-              width: 140, height: 140,
+              width: 120,
+              height: 120,
               decoration: BoxDecoration(
                 color: const Color(0xFF6C63FF).withOpacity(0.1),
                 shape: BoxShape.circle,
-                border: Border.all(color: const Color(0xFF6C63FF).withOpacity(0.3), width: 2),
-              ),
-              child: const Icon(Icons.touch_app_rounded, size: 70, color: Color(0xFF6C63FF)),
-            ),
-            const SizedBox(height: 32),
-            const Text('Ready to Control', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white)),
-            const SizedBox(height: 12),
-            Text('Tap START to begin hand tracking.\nMove your index finger to control cursor.\nPinch thumb & index to click.',
-              textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: Colors.grey.shade400, height: 1.5)),
-            const SizedBox(height: 24),
-            _buildPermissionStatus(),
-            if (_errorMessage != null) ...[
-              const SizedBox(height: 16),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(color: Colors.red.shade900.withOpacity(0.3), borderRadius: BorderRadius.circular(8)),
-                child: Row(
-                  children: [
-                    const Icon(Icons.error_outline, color: Colors.red, size: 20),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(_errorMessage!, style: const TextStyle(color: Colors.red, fontSize: 12))),
-                  ],
+                border: Border.all(
+                  color: const Color(0xFF6C63FF).withOpacity(0.3),
+                  width: 2,
                 ),
               ),
-            ],
+              child: const Icon(
+                Icons.touch_app_rounded,
+                size: 60,
+                color: Color(0xFF6C63FF),
+              ),
+            ),
+            const SizedBox(height: 24),
+            const Text(
+              'Ready to Control',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Tap START to begin hand tracking\n'
+              'Move your hand to control cursor\n'
+              'Pinch thumb & index to click',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.white54,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 32),
+            _buildPermissionStatus(),
           ],
         ),
       ),
@@ -682,30 +451,29 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   Widget _buildPermissionStatus() {
     return Container(
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(12)),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(12),
+      ),
       child: Column(
         children: [
-          _buildPermissionRow('Camera', _hasCameraPermission, () async {
+          _buildPermissionRow('Camera', _hasPermissions, () async {
             await Permission.camera.request();
-            _checkPermissionStatus();
+            _checkPermissions();
           }),
           const SizedBox(height: 8),
-          _buildPermissionRow('Overlay', _canDrawOverlays, () async {
+          _buildPermissionRow('Overlay', _hasPermissions, () async {
             try {
-              await _controlChannel.invokeMethod('requestOverlayPermission');
+              await _methodChannel.invokeMethod('requestOverlayPermission');
               await Future.delayed(const Duration(milliseconds: 500));
-              _checkPermissionStatus();
-            } catch (e) {
-              _showError('Could not request overlay permission');
-            }
+              _checkPermissions();
+            } catch (e) {}
           }),
           const SizedBox(height: 8),
-          _buildPermissionRow('Accessibility', _hasAccessibility, () async {
+          _buildPermissionRow('Accessibility', _hasPermissions, () async {
             try {
-              await _controlChannel.invokeMethod('openAccessibilitySettings');
-            } catch (e) {
-              _showError('Could not open settings');
-            }
+              await _methodChannel.invokeMethod('openAccessibilitySettings');
+            } catch (e) {}
           }),
         ],
       ),
@@ -715,86 +483,173 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   Widget _buildPermissionRow(String name, bool isGranted, VoidCallback onRequest) {
     return Row(
       children: [
-        Icon(isGranted ? Icons.check_circle : Icons.radio_button_unchecked, color: isGranted ? Colors.green : Colors.grey, size: 20),
+        Icon(
+          isGranted ? Icons.check_circle : Icons.radio_button_unchecked,
+          color: isGranted ? Colors.green : Colors.grey,
+          size: 20,
+        ),
         const SizedBox(width: 8),
-        Text(name, style: TextStyle(color: isGranted ? Colors.white : Colors.grey, fontSize: 14)),
+        Text(
+          name,
+          style: TextStyle(
+            color: isGranted ? Colors.white : Colors.grey,
+            fontSize: 14,
+          ),
+        ),
         const Spacer(),
-        if (!isGranted) TextButton(onPressed: onRequest, child: const Text('Grant')),
+        if (!isGranted)
+          TextButton(
+            onPressed: onRequest,
+            child: const Text('Grant'),
+          ),
       ],
     );
   }
   
   Widget _buildTrackingView() {
-    return Stack(
-      children: [
-        if (_cameraController != null && _cameraController!.value.isInitialized)
-          Positioned.fill(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: Transform(
-                alignment: Alignment.center,
-                transform: Matrix4.identity()..scale(-1.0, 1.0),
-                child: CameraPreview(_cameraController!),
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.3),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      margin: const EdgeInsets.all(16),
+      child: Stack(
+        children: [
+          // Stats display
+          Positioned(
+            top: 16,
+            left: 16,
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.7),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'FPS: ${_fps.toStringAsFixed(0)}',
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Gesture: ${_gesture.toUpperCase()}',
+                    style: TextStyle(
+                      color: _gesture == 'pinch' ? Colors.green : Colors.white,
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'X: ${(_cursorX * 100).toStringAsFixed(0)}%  Y: ${(_cursorY * 100).toStringAsFixed(1)}%',
+                    style: const TextStyle(color: Colors.white70, fontSize: 10),
+                  ),
+                ],
               ),
             ),
           ),
-        Positioned(
-          left: _cursorPosition.dx * _screenSize.width - 24,
-          top: _cursorPosition.dy * _screenSize.height - 24,
-          child: Container(
-            width: 48, height: 48,
-            decoration: BoxDecoration(
-              color: const Color(0xFF6C63FF).withOpacity(0.3),
-              shape: BoxShape.circle,
-              border: Border.all(color: const Color(0xFF6C63FF), width: 2),
-            ),
-            child: Icon(_currentGesture == 'pinch' ? Icons.touch_app : Icons.back_hand, color: const Color(0xFF6C63FF)),
-          ),
-        ),
-        Positioned(
-          top: 16, right: 16,
-          child: Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: Colors.black.withOpacity(0.7), borderRadius: BorderRadius.circular(8)),
+          
+          // Center info
+          Center(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text('FPS: ${_currentFps.toStringAsFixed(0)}', style: const TextStyle(color: Colors.white, fontSize: 12)),
-                Text('Gesture: $_currentGesture', style: TextStyle(color: _currentGesture == 'pinch' ? Colors.green : Colors.white, fontSize: 12)),
-                Text('Cursor: ${(_smoothedX * 100).toStringAsFixed(0)}%, ${(_smoothedY * 100).toStringAsFixed(0)}%',
-                  style: const TextStyle(color: Colors.white70, fontSize: 10)),
+                Container(
+                  width: 100,
+                  height: 100,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF6C63FF).withOpacity(0.2),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: const Color(0xFF6C63FF),
+                      width: 2,
+                    ),
+                  ),
+                  child: Icon(
+                    Icons.back_hand,
+                    size: 50,
+                    color: const Color(0xFF6C63FF),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Tracking Active',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Camera is running in background\n'
+                  'Move your hand to control cursor',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.white54,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
               ],
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
   
   Widget _buildControls() {
     return Container(
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(color: Colors.black.withOpacity(0.3), borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.3),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+      ),
       child: SizedBox(
         width: double.infinity,
         child: ElevatedButton(
-          onPressed: _isInitializing ? null : (_isTracking ? _stopTracking : _startTracking),
+          onPressed: _isInitializing
+              ? null
+              : (_isTracking ? _stopTracking : _startTracking),
           style: ElevatedButton.styleFrom(
-            backgroundColor: _isTracking ? Colors.red.shade600 : const Color(0xFF6C63FF),
+            backgroundColor: _isTracking
+                ? Colors.red.shade600
+                : const Color(0xFF6C63FF),
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(vertical: 16),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               if (_isInitializing)
-                const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: const CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                  ),
+                )
               else
-                Icon(_isTracking ? Icons.stop : Icons.play_arrow, size: 24),
+                Icon(
+                  _isTracking ? Icons.stop : Icons.play_arrow,
+                  size: 24,
+                ),
               const SizedBox(width: 8),
-              Text(_isInitializing ? 'Starting...' : (_isTracking ? 'STOP CURSOR' : 'START CURSOR'),
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              Text(
+                _isInitializing
+                    ? 'STARTING...'
+                    : (_isTracking ? 'STOP TRACKING' : 'START TRACKING'),
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ],
           ),
         ),
