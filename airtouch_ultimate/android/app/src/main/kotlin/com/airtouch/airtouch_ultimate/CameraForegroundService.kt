@@ -25,7 +25,6 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.ImageView
-import androidx.annotation.NonNull
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -42,20 +41,21 @@ import com.google.mlkit.vision.pose.PoseLandmark
 import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.sqrt
 
 /**
- * Camera Foreground Service
+ * Camera Foreground Service with ML Kit Pose Detection
  * 
- * - Runs camera using CameraX in a native foreground service
- * - Processes frames with ML Kit Pose Detection
- * - Updates cursor overlay based on hand position
- * - Survives app minimization (background execution)
+ * - Uses ML Kit Pose Detection for hand tracking
+ * - RIGHT_INDEX and LEFT_INDEX landmarks for cursor position
+ * - RIGHT_THUMB and LEFT_THUMB for pinch gesture
+ * - Runs in foreground service to survive app minimization
  */
 class CameraForegroundService : LifecycleService() {
     
     companion object {
-        private const val TAG = "AirTouchCameraService"
+        private const val TAG = "AirTouchService"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "airtouch_camera_service"
         
@@ -89,9 +89,15 @@ class CameraForegroundService : LifecycleService() {
         var isRunning: Boolean = false
             private set
         
+        // FPS tracking
+        @Volatile
+        var currentFps: Float = 0f
+            private set
+        
         // Callbacks
         var onGestureDetected: ((String) -> Unit)? = null
         var onPositionUpdate: ((Float, Float) -> Unit)? = null
+        var onFpsUpdate: ((Float) -> Unit)? = null
     }
     
     // CameraX components
@@ -109,16 +115,20 @@ class CameraForegroundService : LifecycleService() {
     private var displayWidth: Int = 1080
     private var displayHeight: Int = 2400
     
-    // EMA Smoothing (more responsive)
+    // Smoothing (EMA - Exponential Moving Average)
     private var smoothedX: Float = 0.5f
     private var smoothedY: Float = 0.5f
-    private val smoothingAlpha = 0.35f
+    private val smoothingAlpha = 0.4f  // Higher = more responsive
     
     // Gesture detection
     private var lastGestureTime: Long = 0
-    private val gestureDebounceMs: Long = 250
+    private val gestureDebounceMs: Long = 200
     private var lastClickTime: Long = 0
     private val clickDebounceMs: Long = 400
+    
+    // FPS calculation
+    private var frameCount: Long = 0
+    private var lastFpsTime: Long = 0
     
     // Accessibility service
     private val accessibilityService: AirTouchAccessibilityService?
@@ -128,13 +138,13 @@ class CameraForegroundService : LifecycleService() {
     
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "CameraForegroundService onCreate")
+        Log.d(TAG, "=== CameraForegroundService onCreate ===")
         instance = this
         
         // Get screen dimensions
         getScreenDimensions()
         
-        // Initialize smoothed position
+        // Initialize smoothed position to center
         smoothedX = 0.5f
         smoothedY = 0.5f
         cursorX = 0.5f
@@ -144,10 +154,12 @@ class CameraForegroundService : LifecycleService() {
         
         // Create notification channel
         createNotificationChannel()
+        
+        Log.d(TAG, "Screen dimensions: ${displayWidth}x${displayHeight}")
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "CameraForegroundService onStartCommand")
+        Log.d(TAG, "=== CameraForegroundService onStartCommand ===")
         
         // Create and show foreground notification
         val notification = createNotification()
@@ -164,6 +176,7 @@ class CameraForegroundService : LifecycleService() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            Log.d(TAG, "Foreground service started successfully")
         } catch (e: Exception) {
             Log.e(TAG, "Error starting foreground: ${e.message}")
             // Fallback
@@ -223,15 +236,6 @@ class CameraForegroundService : LifecycleService() {
     }
     
     private fun createNotification(): Notification {
-        val stopIntent = Intent(this, CameraForegroundService::class.java).apply {
-            action = "STOP"
-        }
-        val stopPendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.getService(this, 0, stopIntent, PendingIntent.FLAG_IMMUTABLE)
-        } else {
-            PendingIntent.getService(this, 0, stopIntent, 0)
-        }
-        
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("AirTouch Ultimate")
             .setContentText("Hand tracking active - Move your hand to control cursor")
@@ -244,15 +248,18 @@ class CameraForegroundService : LifecycleService() {
     
     private fun initPoseDetector() {
         try {
+            Log.d(TAG, "Initializing ML Kit Pose Detector...")
+            
             val options = PoseDetectorOptions.Builder()
                 .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
-                .setPreferredHardwareConfigs(listOf(PoseDetectorOptions.CPU))
+                .setPreferredHardwareConfigs(PoseDetectorOptions.CPU)
                 .build()
             
             poseDetector = PoseDetection.getClient(options)
-            Log.d(TAG, "Pose detector initialized")
+            Log.d(TAG, "ML Kit Pose Detector initialized successfully")
+            
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to init pose detector: ${e.message}")
+            Log.e(TAG, "Failed to init Pose Detector: ${e.message}")
         }
     }
     
@@ -302,7 +309,7 @@ class CameraForegroundService : LifecycleService() {
                 imageAnalysis
             )
             
-            Log.d(TAG, "Camera bound successfully")
+            Log.d(TAG, "Camera bound successfully - Front camera active")
             
         } catch (e: Exception) {
             Log.e(TAG, "Error binding camera: ${e.message}")
@@ -310,9 +317,19 @@ class CameraForegroundService : LifecycleService() {
     }
     
     private fun processImage(imageProxy: ImageProxy) {
-        if (!isRunning || poseDetector == null) {
+        if (!isRunning) {
             imageProxy.close()
             return
+        }
+        
+        // FPS calculation
+        frameCount++
+        val now = System.currentTimeMillis()
+        if (now - lastFpsTime >= 1000) {
+            currentFps = frameCount.toFloat()
+            frameCount = 0
+            lastFpsTime = now
+            onFpsUpdate?.invoke(currentFps)
         }
         
         try {
@@ -322,7 +339,7 @@ class CameraForegroundService : LifecycleService() {
                 return
             }
             
-            // Create InputImage with correct rotation
+            // Create InputImage with rotation info
             val rotation = imageProxy.imageInfo.rotationDegrees
             val inputImage = InputImage.fromMediaImage(mediaImage, rotation)
             
@@ -364,13 +381,18 @@ class CameraForegroundService : LifecycleService() {
             
             if (indexTip == null) return
             
-            // Get coordinates
+            // Get coordinates - ML Kit returns coordinates in the original image coordinate system
+            // After rotation is applied, coordinates are in the output image coordinate system
             val landmarkX = indexTip.position.x
             val landmarkY = indexTip.position.y
             
-            // Image dimensions (account for rotation)
-            val imgW = if (rotation == 90 || rotation == 270) imageHeight else imageWidth
-            val imgH = if (rotation == 90 || rotation == 270) imageWidth else imageHeight
+            // CRITICAL: ML Kit Pose landmark positions are already normalized to the input image
+            // dimensions after accounting for rotation. We need to normalize to 0-1.
+            
+            // Use the ORIGINAL image dimensions (before rotation consideration)
+            // ML Kit internally handles rotation and gives us coordinates in the image frame
+            val imgW = imageWidth.toFloat()
+            val imgH = imageHeight.toFloat()
             
             // Normalize coordinates (0-1)
             var normalizedX = (landmarkX / imgW).coerceIn(0f, 1f)
@@ -379,7 +401,7 @@ class CameraForegroundService : LifecycleService() {
             // Mirror X for front camera natural feel
             normalizedX = 1f - normalizedX
             
-            // Apply EMA smoothing
+            // Apply EMA smoothing for stable cursor
             smoothedX = smoothingAlpha * normalizedX + (1f - smoothingAlpha) * smoothedX
             smoothedY = smoothingAlpha * normalizedY + (1f - smoothingAlpha) * smoothedY
             
@@ -387,15 +409,15 @@ class CameraForegroundService : LifecycleService() {
             cursorX = smoothedX
             cursorY = smoothedY
             
-            // Update overlay
-            updateCursorOverlay(smoothedX, smoothedY)
-            
-            // Notify position update
-            onPositionUpdate?.invoke(smoothedX, smoothedY)
+            // Update overlay on main thread
+            handler.post {
+                updateCursorOverlay(smoothedX, smoothedY)
+                onPositionUpdate?.invoke(smoothedX, smoothedY)
+            }
             
             // Detect gestures
             if (thumbTip != null && thumbTip.inFrameLikelihood > 0.5f) {
-                detectGestures(indexTip, thumbTip)
+                detectGestures(indexTip, thumbTip, imgW, imgH)
             }
             
         } catch (e: Exception) {
@@ -403,24 +425,24 @@ class CameraForegroundService : LifecycleService() {
         }
     }
     
-    private fun detectGestures(indexTip: PoseLandmark, thumbTip: PoseLandmark) {
+    private fun detectGestures(indexTip: PoseLandmark, thumbTip: PoseLandmark, imgW: Float, imgH: Float) {
         val now = System.currentTimeMillis()
         if (now - lastGestureTime < gestureDebounceMs) return
         
         try {
-            // Calculate pinch distance
-            val dx = indexTip.position.x - thumbTip.position.x
-            val dy = indexTip.position.y - thumbTip.position.y
+            // Calculate pinch distance (normalized)
+            val dx = (indexTip.position.x - thumbTip.position.x) / imgW
+            val dy = (indexTip.position.y - thumbTip.position.y) / imgH
             val distance = sqrt((dx * dx + dy * dy).toDouble()).toFloat()
             
-            // Pinch threshold
-            val pinchThreshold = 60f
+            // Pinch threshold (normalized, ~8% of screen)
+            val pinchThreshold = 0.08f
             
             if (distance < pinchThreshold) {
                 if (currentGesture != "pinch") {
                     lastGestureTime = now
                     currentGesture = "pinch"
-                    onGestureDetected?.invoke("pinch")
+                    handler.post { onGestureDetected?.invoke("pinch") }
                     
                     // Perform click
                     if (now - lastClickTime > clickDebounceMs) {
@@ -431,7 +453,7 @@ class CameraForegroundService : LifecycleService() {
             } else {
                 if (currentGesture != "open") {
                     currentGesture = "open"
-                    onGestureDetected?.invoke("open")
+                    handler.post { onGestureDetected?.invoke("open") }
                 }
             }
             
@@ -445,7 +467,7 @@ class CameraForegroundService : LifecycleService() {
             val screenX = smoothedX * displayWidth
             val screenY = smoothedY * displayHeight
             
-            Log.d(TAG, "Performing click at ($screenX, $screenY)")
+            Log.d(TAG, ">>> CLICK at ($screenX, $screenY)")
             
             accessibilityService?.performClick(screenX, screenY)
             
@@ -469,10 +491,10 @@ class CameraForegroundService : LifecycleService() {
             val cursorDrawable = createCursorDrawable()
             cursorView?.setImageDrawable(cursorDrawable)
             cursorView?.measure(
-                View.MeasureSpec.makeMeasureSpec(56, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(56, View.MeasureSpec.EXACTLY)
+                View.MeasureSpec.makeMeasureSpec(48, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(48, View.MeasureSpec.EXACTLY)
             )
-            cursorView?.layout(0, 0, 56, 56)
+            cursorView?.layout(0, 0, 48, 48)
             
             // Window params
             val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -483,7 +505,7 @@ class CameraForegroundService : LifecycleService() {
             }
             
             cursorParams = WindowManager.LayoutParams(
-                56, 56,
+                48, 48,
                 layoutType,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
@@ -499,7 +521,7 @@ class CameraForegroundService : LifecycleService() {
             windowManager?.addView(cursorView, cursorParams)
             isOverlayVisible = true
             
-            Log.d(TAG, "Cursor overlay shown")
+            Log.d(TAG, ">>> Cursor overlay SHOWN at (${cursorParams?.x}, ${cursorParams?.y})")
             
         } catch (e: Exception) {
             Log.e(TAG, "Error showing cursor: ${e.message}")
@@ -513,6 +535,7 @@ class CameraForegroundService : LifecycleService() {
                 cursorView = null
                 cursorParams = null
                 isOverlayVisible = false
+                Log.d(TAG, "Cursor overlay hidden")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error hiding cursor: ${e.message}")
@@ -526,39 +549,36 @@ class CameraForegroundService : LifecycleService() {
         val screenX = (normalizedX * displayWidth).toInt()
         val screenY = (normalizedY * displayHeight).toInt()
         
-        // Update on main thread
-        handler.post {
-            try {
-                cursorParams?.x = screenX - 4  // Offset for cursor tip
-                cursorParams?.y = screenY - 4
-                windowManager?.updateViewLayout(cursorView, cursorParams)
-            } catch (e: Exception) {
-                // View might be detached
-            }
+        try {
+            cursorParams?.x = screenX - 4  // Offset for cursor tip
+            cursorParams?.y = screenY - 4
+            windowManager?.updateViewLayout(cursorView, cursorParams)
+        } catch (e: Exception) {
+            // View might be detached
         }
     }
     
     private fun createCursorDrawable(): Drawable {
-        val size = 40
+        val size = 36
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         
-        // Mouse pointer arrow
+        // Mouse pointer arrow shape
         val path = Path().apply {
             moveTo(2f, 2f)
-            lineTo(2f, 32f)
-            lineTo(10f, 24f)
-            lineTo(16f, 36f)
-            lineTo(20f, 34f)
-            lineTo(14f, 22f)
-            lineTo(24f, 22f)
+            lineTo(2f, 28f)
+            lineTo(9f, 21f)
+            lineTo(14f, 32f)
+            lineTo(18f, 30f)
+            lineTo(13f, 19f)
+            lineTo(22f, 19f)
             close()
         }
         
         // Shadow
         val shadowPaint = Paint().apply {
             isAntiAlias = true
-            color = Color.parseColor("#88000000")
+            color = Color.parseColor("#66000000")
             style = Paint.Style.FILL
         }
         canvas.save()
@@ -588,7 +608,7 @@ class CameraForegroundService : LifecycleService() {
     }
     
     override fun onDestroy() {
-        Log.d(TAG, "CameraForegroundService onDestroy")
+        Log.d(TAG, "=== CameraForegroundService onDestroy ===")
         
         isRunning = false
         instance = null
@@ -606,6 +626,7 @@ class CameraForegroundService : LifecycleService() {
         
         // Shutdown executor
         cameraExecutor?.shutdown()
+        cameraExecutor?.awaitTermination(1, TimeUnit.SECONDS)
         cameraExecutor = null
         
         // Close pose detector
@@ -619,9 +640,8 @@ class CameraForegroundService : LifecycleService() {
         // Clear callbacks
         onGestureDetected = null
         onPositionUpdate = null
+        onFpsUpdate = null
         
         super.onDestroy()
     }
-    
-    override fun onBind(intent: Intent?): IBinder? = null
 }

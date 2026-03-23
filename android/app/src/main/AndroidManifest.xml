@@ -8,10 +8,9 @@
     
     <uses-permission android:name="android.permission.CAMERA" />
     
-    <!-- Foreground Service Permissions - ANDROID 14/15/16+ CRITICAL -->
+    <!-- Foreground Service Permissions -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     
     <!-- Overlay & System -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -26,9 +25,8 @@
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
-        android:enableOnBackInvokedCallback="true"
         android:hardwareAccelerated="true"
-        tools:targetApi="35">
+        tools:targetApi="34">
         
         <activity
             android:name=".MainActivity"
@@ -51,16 +49,13 @@
             </intent-filter>
         </activity>
         
-        <!-- Camera Foreground Service - ANDROID 14/15/16+ COMPLIANT -->
+        <!-- Camera Foreground Service -->
         <service
             android:name=".CameraForegroundService"
             android:exported="false"
             android:enabled="true"
-            android:foregroundServiceType="camera|specialUse"
+            android:foregroundServiceType="camera"
             android:stopWithTask="false">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="hand_tracking_cursor_control" />
         </service>
         
         <!-- Accessibility Service for System-Level Gestures -->

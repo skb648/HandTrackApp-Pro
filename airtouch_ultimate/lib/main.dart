@@ -33,8 +33,6 @@ void main() {
   });
 }
 
-}
-
 class AirTouchUltimateApp extends StatelessWidget {
   const AirTouchUltimateApp({super.key});
 
@@ -66,7 +64,7 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   static const _methodChannel = MethodChannel('com.airtouch.ultimate/control');
-  static const _eventChannel = EventChannel('com.airtouch.ultimate/events')
+  static const _eventChannel = EventChannel('com.airtouch.ultimate/events');
   
   // State
   bool _isTracking = false;
@@ -74,13 +72,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   bool _hasPermissions = false;
   
   // Cursor position (normalized 0-1)
-  double _cursorX = 00.5;
-  double _cursorY = 00.5;
+  double _cursorX = 0.5;
+  double _cursorY = 0.5;
   String _gesture = 'none';
   double _fps = 0;
-  
-  // Event sink
-  EventChannel.EventSink? _eventSink;
   
   // Stream subscription
   StreamSubscription<dynamic>? _eventSubscription;
@@ -90,32 +85,37 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     
-    // Check permissions without checking
+    // Check permissions
     _checkPermissions();
     
     // Enable wakelock
     WakelockPlus.enable();
     
-    // Listen to event channel
-    _eventSubscription = _eventChannel.receiveBroadcastStream.listen((event) {
-      if (event is Map) {
-        final type = event['type'];
-        if (type == 'position') {
-          setState(() {
-            _cursorX = (event['x'] as num?) ?? 0.5;
-            _cursorY = (event['y'] as num?) ?? 0.5;
-          });
-        } else if (type == 'gesture') {
-          setState(() {
-            _gesture = event['gesture'] as String? ?? 'none';
-          });
-        } else if (type == 'fps') {
-          setState(() {
-            _fps = (event['fps'] as num?) ?? 0;
-          });
+    // Listen to event channel for position updates
+    _eventSubscription = _eventChannel.receiveBroadcastStream().listen(
+      (event) {
+        if (event is Map) {
+          final type = event['type'];
+          if (type == 'position') {
+            setState(() {
+              _cursorX = (event['x'] as num?)?.toDouble() ?? 0.5;
+              _cursorY = (event['y'] as num?)?.toDouble() ?? 0.5;
+            });
+          } else if (type == 'gesture') {
+            setState(() {
+              _gesture = event['gesture'] as String? ?? 'none';
+            });
+          } else if (type == 'fps') {
+            setState(() {
+              _fps = (event['fps'] as num?)?.toDouble() ?? 0;
+            });
+          }
         }
-      }
-    });
+      },
+      onError: (error) {
+        debugPrint('Event channel error: $error');
+      },
+    );
   }
   
   @override
@@ -198,7 +198,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       final result = await _methodChannel.invokeMethod('startTracking');
       
       if (result == true) {
-        debugPrint('=== Tracking Started ===');
+        debugPrint('=== Tracking Started Successfully ===');
         if (mounted) {
           setState(() {
             _isTracking = true;
@@ -271,6 +271,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     try {
       WakelockPlus.disable();
     } catch (e) {}
+    _eventSubscription?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -336,7 +337,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               ),
             ),
           ),
-          ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -351,7 +351,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   ),
                 ),
                 Text(
-                  'Hand Gesture Controller v5.1',
+                  'Hand Gesture Controller v6.0',
                   style: TextStyle(
                     fontSize: 12,
                     color: Colors.white54,
@@ -543,7 +543,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    'X: ${(_cursorX * 100).toStringAsFixed(0)}%  Y: ${(_cursorY * 100).toStringAsFixed(1)}%',
+                    'X: ${(_cursorX * 100).toStringAsFixed(0)}%  Y: ${(_cursorY * 100).toStringAsFixed(0)}%',
                     style: const TextStyle(color: Colors.white70, fontSize: 10),
                   ),
                 ],
@@ -584,13 +584,56 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Camera is running in background\n'
+                  'Camera is running in foreground service\n'
                   'Move your hand to control cursor',
                   style: TextStyle(
                     fontSize: 12,
                     color: Colors.white54,
                   ),
                   textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                // Live cursor position indicator
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF6C63FF).withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: const Color(0xFF6C63FF).withOpacity(0.3),
+                    ),
+                  ),
+                  child: Stack(
+                    children: [
+                      Positioned(
+                        left: _cursorX * 64 + 4,
+                        top: _cursorY * 64 + 4,
+                        child: Container(
+                          width: 12,
+                          height: 12,
+                          decoration: BoxDecoration(
+                            color: _gesture == 'pinch' ? Colors.green : const Color(0xFF6C63FF),
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: (_gesture == 'pinch' ? Colors.green : const Color(0xFF6C63FF)).withOpacity(0.5),
+                                blurRadius: 8,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Cursor Preview',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: Colors.white38,
+                  ),
                 ),
               ],
             ),
@@ -630,7 +673,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 const SizedBox(
                   width: 20,
                   height: 20,
-                  child: const CircularProgressIndicator(
+                  child: CircularProgressIndicator(
                     strokeWidth: 2,
                     valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                   ),

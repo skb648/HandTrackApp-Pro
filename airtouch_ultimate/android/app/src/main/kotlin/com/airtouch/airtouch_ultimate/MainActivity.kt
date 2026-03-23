@@ -1,19 +1,10 @@
 package com.airtouch.airtouch_ultimate
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Path
-import android.graphics.PixelFormat
-import android.graphics.drawable.BitmapDrawable
-import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -21,21 +12,16 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
-import android.view.Gravity
-import android.view.View
 import android.view.WindowManager
-import android.view.accessibility.AccessibilityEvent
-import android.widget.ImageView
-import androidx.core.app.NotificationCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import kotlin.math.sqrt
 
 /**
  * AirTouch Ultimate - Main Activity
- * Production-ready hand tracking controller
+ * Production-ready hand tracking controller with MediaPipe Hands
  */
 class MainActivity : FlutterActivity() {
     
@@ -64,41 +50,74 @@ class MainActivity : FlutterActivity() {
     private var screenHeight = 2400
     private val handler = Handler(Looper.getMainLooper())
     
+    // Periodic update runnable
+    private val updateRunnable = object : Runnable {
+        override fun run() {
+            if (CameraForegroundService.isRunning && eventSink != null) {
+                // Send position update
+                val positionMap = mapOf(
+                    "type" to "position",
+                    "x" to CameraForegroundService.cursorX,
+                    "y" to CameraForegroundService.cursorY
+                )
+                handler.post { eventSink?.success(positionMap) }
+                
+                // Send FPS update
+                val fpsMap = mapOf(
+                    "type" to "fps",
+                    "fps" to CameraForegroundService.currentFps
+                )
+                handler.post { eventSink?.success(fpsMap) }
+            }
+            
+            // Schedule next update
+            if (eventSink != null) {
+                handler.postDelayed(this, 50) // 20 FPS for UI updates
+            }
+        }
+    }
+    
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         instance = this
         getScreenDimensions()
         createNotificationChannel()
+        Log.d(TAG, "=== MainActivity onCreate ===")
     }
     
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         Log.d(TAG, "Configuring Flutter Engine")
         
-        // Method Channel
+        // Method Channel for control commands
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, METHOD_CHANNEL)
             .setMethodCallHandler { call, result ->
                 handleMethodCall(call, result)
             }
         
-        // Event Channel
+        // Event Channel for streaming data
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, EVENT_CHANNEL)
             .setStreamHandler(object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, sink: EventChannel.EventSink?) {
+                    Log.d(TAG, "Event Channel onListen")
                     eventSink = sink
                     setupCallbacks()
+                    // Start periodic updates
+                    handler.post(updateRunnable)
                 }
                 
                 override fun onCancel(arguments: Any?) {
+                    Log.d(TAG, "Event Channel onCancel")
                     eventSink = null
                     clearCallbacks()
+                    handler.removeCallbacks(updateRunnable)
                 }
             })
         
         Log.d(TAG, "Flutter engine configured")
     }
     
-    private fun handleMethodCall(call: MethodChannel.MethodCall, result: MethodChannel.Result) {
+    private fun handleMethodCall(call: MethodCall, result: MethodChannel.Result) {
         Log.d(TAG, "Method called: ${call.method}")
         
         when (call.method) {
@@ -149,8 +168,10 @@ class MainActivity : FlutterActivity() {
             
             "startTracking" -> {
                 try {
+                    Log.d(TAG, ">>> Starting Camera Service")
                     startCameraService()
                     result.success(true)
+                    Log.d(TAG, ">>> Camera Service Started Successfully")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to start tracking: ${e.message}")
                     result.error("ERROR", e.message, null)
@@ -159,8 +180,10 @@ class MainActivity : FlutterActivity() {
             
             "stopTracking" -> {
                 try {
+                    Log.d(TAG, ">>> Stopping Camera Service")
                     stopCameraService()
                     result.success(true)
+                    Log.d(TAG, ">>> Camera Service Stopped")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to stop tracking: ${e.message}")
                     result.error("ERROR", e.message, null)
@@ -179,14 +202,20 @@ class MainActivity : FlutterActivity() {
                     "x" to CameraForegroundService.cursorX,
                     "y" to CameraForegroundService.cursorY,
                     "gesture" to CameraForegroundService.currentGesture,
-                    "isRunning" to CameraForegroundService.isRunning
+                    "isRunning" to CameraForegroundService.isRunning,
+                    "fps" to CameraForegroundService.currentFps
                 ))
             }
             
             "vibrate" -> {
                 try {
                     val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
-                    vibrator?.vibrate(50)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        vibrator.vibrate(android.os.VibrationEffect.createOneShot(50, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        vibrator.vibrate(50)
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "Vibration error: ${e.message}")
                 }
@@ -198,22 +227,33 @@ class MainActivity : FlutterActivity() {
     }
     
     private fun setupCallbacks() {
+        Log.d(TAG, "Setting up callbacks")
+        
+        // Gesture callback
         CameraForegroundService.onGestureDetected = { gesture ->
             handler.post {
+                Log.d(TAG, ">>> Gesture detected: $gesture")
                 eventSink?.success(mapOf("type" to "gesture", "gesture" to gesture))
             }
         }
         
+        // Position callback (real-time from MediaPipe)
         CameraForegroundService.onPositionUpdate = { x, y ->
-            handler.post {
-                eventSink?.success(mapOf("type" to "position", "x" to x, "y" to y))
-            }
+            // Position updates are handled by the updateRunnable
+            // But we can also send them here for more responsive updates
+        }
+        
+        // FPS callback
+        CameraForegroundService.onFpsUpdate = { fps ->
+            // FPS updates are handled by the updateRunnable
         }
     }
     
     private fun clearCallbacks() {
+        Log.d(TAG, "Clearing callbacks")
         CameraForegroundService.onGestureDetected = null
         CameraForegroundService.onPositionUpdate = null
+        CameraForegroundService.onFpsUpdate = null
     }
     
     private fun getScreenDimensions() {
@@ -275,6 +315,7 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         Log.d(TAG, "MainActivity onDestroy")
         stopCameraService()
+        handler.removeCallbacks(updateRunnable)
         instance = null
         super.onDestroy()
     }
@@ -299,10 +340,10 @@ class AirTouchAccessibilityService : android.accessibilityservice.AccessibilityS
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        Log.d(TAG, "Accessibility Service Connected")
+        Log.d(TAG, "=== Accessibility Service Connected ===")
     }
     
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+    override fun onAccessibilityEvent(event: android.view.accessibility.AccessibilityEvent?) {
         // Not needed
     }
     
@@ -320,16 +361,18 @@ class AirTouchAccessibilityService : android.accessibilityservice.AccessibilityS
      */
     fun performClick(screenX: Float, screenY: Float): Boolean {
         return try {
-            val path = Path().apply {
+            Log.d(TAG, ">>> performClick at ($screenX, $screenY)")
+            
+            val path = android.graphics.Path().apply {
                 moveTo(screenX, screenY)
             }
             
-            val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, 10))
+            val gesture = android.accessibilityservice.GestureDescription.Builder()
+                .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 10))
                 .build()
             
             val result = dispatchGesture(gesture, null, null)
-            Log.d(TAG, "Click at ($screenX, $screenY) - result: $result")
+            Log.d(TAG, ">>> Click result: $result")
             result
         } catch (e: Exception) {
             Log.e(TAG, "Click failed: ${e.message}")
@@ -342,13 +385,13 @@ class AirTouchAccessibilityService : android.accessibilityservice.AccessibilityS
      */
     fun performSwipe(startX: Float, startY: Float, endX: Float, endY: Float, duration: Long): Boolean {
         return try {
-            val path = Path().apply {
+            val path = android.graphics.Path().apply {
                 moveTo(startX, startY)
                 lineTo(endX, endY)
             }
             
-            val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
+            val gesture = android.accessibilityservice.GestureDescription.Builder()
+                .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, duration))
                 .build()
             
             dispatchGesture(gesture, null, null)
