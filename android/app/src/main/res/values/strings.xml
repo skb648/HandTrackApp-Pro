@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AirTouch Ultimate</string>
+    <string name="accessibility_service_description">
+        AirTouch Ultimate uses accessibility services to perform air gestures on your device.
+        This allows you to control your device using hand gestures detected by the front camera.
+        The service can perform taps, swipes, scrolls, and navigation gestures based on your hand movements.
+        No data is collected or stored - all processing happens locally on your device.
+    </string>
+    <string name="foreground_service_notification_title">AirTouch Ultimate - Tracking Active</string>
+    <string name="foreground_service_notification_text">Hand tracking is running. Tap to open the app.</string>
+</resources>

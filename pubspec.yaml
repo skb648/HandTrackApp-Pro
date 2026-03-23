@@ -1,0 +1,56 @@
+name: airtouch_ultimate
+description: "AirTouch Ultimate - Production-Grade Android Air-Gesture Controller with Real Hand Tracking"
+publish_to: 'none'
+version: 4.0.0+4
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI
+  cupertino_icons: ^1.0.6
+  provider: ^6.1.1
+  flutter_svg: ^2.0.9
+
+  # Camera & ML
+  camera: ^0.11.0+2
+  google_mlkit_pose_detection: ^0.11.0
+
+  # Background Service - CRITICAL for Android 16+
+  flutter_background_service: ^5.0.10
+  flutter_background_service_android: ^6.2.7
+
+  # Permissions
+  permission_handler: ^11.3.0
+
+  # Utilities
+  vector_math: ^2.1.4
+  shared_preferences: ^2.2.2
+  wakelock_plus: ^1.2.1
+  vibration: ^2.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+  flutter_launcher_icons: ^0.13.1
+
+# ═══════════════════════════════════════════════════════════════
+# CUSTOM APP LOGO CONFIGURATION
+# ═══════════════════════════════════════════════════════════════
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon.png"
+  adaptive_icon_background: "#0D1B2A"
+  adaptive_icon_foreground: "assets/icon_foreground.png"
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/fonts/
+    - assets/

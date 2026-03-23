@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AirTouch Ultimate</string>
+    <string name="accessibility_service_description">
+        AirTouch Ultimate uses accessibility services to perform gesture-based interactions on your device.
+        This allows the app to tap, swipe, and interact with other apps using hand gestures detected through the camera.
+        No data is collected or stored. This service is required for the cursor control and gesture features to work.
+    </string>
+</resources>
