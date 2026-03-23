@@ -1,21 +1,13 @@
 package com.airtouch.ultimate
 
-import android.content.Intent
-import android.os.Build
-import android.os.Bundle
-import android.provider.Settings
-import android.util.Log
-import android.view.accessibility.AccessibilityEvent
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
-import android.graphics.PointF
+import android.util.Log
+import android.view.accessibility.AccessibilityEvent
 
 /**
  * Accessibility Service for System-Level Click Injection
- * 
- * This service enables clicking anywhere on screen by using
- * Android's Accessibility API gesture dispatch.
  */
 class AirTouchAccessibilityService : AccessibilityService() {
     

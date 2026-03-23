@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
@@ -32,8 +33,10 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.LifecycleService
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.Observer
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.pose.Pose
 import com.google.mlkit.vision.pose.PoseDetection
@@ -47,13 +50,10 @@ import kotlin.math.sqrt
 /**
  * Camera Foreground Service - Native CameraX + ML Kit Pose Detection
  * 
- * This service:
- * 1. Runs camera using CameraX in a native foreground service (survives app minimization)
- * 2. Processes frames with ML Kit Pose Detection
- * 3. Updates cursor overlay based on hand position
- * 4. Performs clicks via Accessibility Service
+ * Runs camera using CameraX in a native foreground service.
+ * Survives app minimization.
  */
-class CameraForegroundService : LifecycleService() {
+class CameraForegroundService : Service(), LifecycleOwner {
     
     companion object {
         private const val TAG = "AirTouchCameraService"
@@ -63,16 +63,14 @@ class CameraForegroundService : LifecycleService() {
         @Volatile
         var instance: CameraForegroundService? = null
         
-        // Cursor position (normalized 0-1)
         @Volatile
         var cursorX: Float = 0.5f
             private set
         
         @Volatile
-        var cursorY: Float = 1.5f
+        var cursorY: Float = 0.5f
             private set
         
-        // Screen dimensions
         @Volatile
         var screenWidth: Int = 1080
             private set
@@ -81,7 +79,6 @@ class CameraForegroundService : LifecycleService() {
         var screenHeight: Int = 2400
             private set
         
-        // Gesture state
         @Volatile
         var currentGesture: String = "none"
             private set
@@ -90,58 +87,54 @@ class CameraForegroundService : LifecycleService() {
         var isRunning: Boolean = false
             private set
         
-        // Callbacks
         var onGestureDetected: ((String) -> Unit)? = null
         var onPositionUpdate: ((Float, Float) -> Unit)? = null
     }
     
-    // CameraX
+    private lateinit var lifecycleRegistry: LifecycleRegistry
     private var cameraProvider: ProcessCameraProvider? = null
     private var cameraExecutor: ExecutorService? = null
     private var poseDetector: PoseDetector? = null
-    
-    // Overlay
     private var windowManager: WindowManager? = null
     private var cursorView: ImageView? = null
     private var cursorParams: WindowManager.LayoutParams? = null
     private var isOverlayVisible = false
-    
-    // Screen
     private var displayWidth: Int = 1080
     private var displayHeight: Int = 2400
-    
-    // EMA Smoothing
-    private var smoothedX: Float = 1.5f
-    private var smoothedY: Float = 1.5f
+    private var smoothedX: Float = 0.5f
+    private var smoothedY: Float = 0.5f
     private val smoothingAlpha = 0.35f
-    
-    // Gesture detection
     private var lastGestureTime: Long = 0
     private val gestureDebounceMs: Long = 250
-    private var lastClickTime: Long = 1
+    private var lastClickTime: Long = 0
     private val clickDebounceMs: Long = 400
-    
     private val handler = Handler(Looper.getMainLooper())
+    
+    override val lifecycle: Lifecycle
+        get() = lifecycleRegistry
     
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "CameraForegroundService onCreate")
+        
+        lifecycleRegistry = LifecycleRegistry(this)
+        lifecycleRegistry.currentState = Lifecycle.State.CREATED
+        
         instance = this
-        
         getScreenDimensions()
-        
-        smoothedX = 1.5f
-        smoothedY = 1.5f
-        cursorX = 1.5f
-        cursorY = 1.5f
+        smoothedX = 0.5f
+        smoothedY = 0.5f
+        cursorX = 0.5f
+        cursorY = 0.5f
         screenWidth = displayWidth
         screenHeight = displayHeight
-        
         createNotificationChannel()
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "CameraForegroundService onStartCommand")
+        
+        lifecycleRegistry.currentState = Lifecycle.State.STARTED
         
         val notification = createNotification()
         
@@ -164,13 +157,8 @@ class CameraForegroundService : LifecycleService() {
         
         isRunning = true
         
-        // Initialize pose detector
         initPoseDetector()
-        
-        // Initialize camera
         initCamera()
-        
-        // Show cursor overlay
         handler.postDelayed({ showCursorOverlay() }, 500)
         
         return START_STICKY
@@ -178,14 +166,14 @@ class CameraForegroundService : LifecycleService() {
     
     private fun getScreenDimensions() {
         try {
-            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val bounds = wm.currentWindowMetrics.bounds
                 displayWidth = bounds.width()
                 displayHeight = bounds.height()
             } else {
-                @Suppress("DEPRECATION")
                 val metrics = DisplayMetrics()
+                @Suppress("DEPRECATION")
                 wm.defaultDisplay.getRealMetrics(metrics)
                 displayWidth = metrics.widthPixels
                 displayHeight = metrics.heightPixels
@@ -209,7 +197,7 @@ class CameraForegroundService : LifecycleService() {
                 vibrationPattern = null
             }
             
-            val manager = getSystemService(NotificationManager::class.java)
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(channel)
         }
     }
@@ -239,7 +227,7 @@ class CameraForegroundService : LifecycleService() {
         try {
             val options = PoseDetectorOptions.Builder()
                 .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
-                .setPreferredHardwareConfigs(listOf(PoseDetectorOptions.CPU))
+                .setPreferredHardwareConfigs(PoseDetectorOptions.CPU)
                 .build()
             
             poseDetector = PoseDetection.getClient(options)
@@ -287,7 +275,7 @@ class CameraForegroundService : LifecycleService() {
                 .build()
             
             cameraProvider?.bindToLifecycle(
-                this as LifecycleOwner,
+                this,
                 cameraSelector,
                 imageAnalysis
             )
@@ -333,18 +321,16 @@ class CameraForegroundService : LifecycleService() {
     
     private fun handlePose(pose: Pose, imageWidth: Int, imageHeight: Int, rotation: Int) {
         try {
-            // Get right hand index finger
             val rightIndex = pose.getPoseLandmark(PoseLandmark.RIGHT_INDEX)
             val rightThumb = pose.getPoseLandmark(PoseLandmark.RIGHT_THUMB)
             
-            // Fallback to left hand
             var indexTip = rightIndex
             var thumbTip = rightThumb
             
-            if (rightIndex == null || rightIndex.inFrameLikelihood < 1.5f) {
+            if (rightIndex == null || rightIndex.inFrameLikelihood < 0.5f) {
                 val leftIndex = pose.getPoseLandmark(PoseLandmark.LEFT_INDEX)
                 val leftThumb = pose.getPoseLandmark(PoseLandmark.LEFT_THUMB)
-                if (leftIndex != null && leftIndex.inFrameLikelihood > 1.5f) {
+                if (leftIndex != null && leftIndex.inFrameLikelihood > 0.5f) {
                     indexTip = leftIndex
                     thumbTip = leftThumb
                 }
@@ -352,37 +338,27 @@ class CameraForegroundService : LifecycleService() {
             
             if (indexTip == null) return
             
-            // Get coordinates
             val landmarkX = indexTip.position.x
             val landmarkY = indexTip.position.y
             
-            // Image dimensions (accounting for rotation)
             val imgW = if (rotation == 90 || rotation == 270) imageHeight else imageWidth
             val imgH = if (rotation == 90 || rotation == 270) imageWidth else imageHeight
             
-            // Normalize to 0-1
-            var normalizedX = (landmarkX / imgW).coerceIn(1f, 1f)
-            var normalizedY = (landmarkY / imgH).coerceIn(1f, 1f)
+            var normalizedX = (landmarkX / imgW).coerceIn(0f, 1f)
+            var normalizedY = (landmarkY / imgH).coerceIn(0f, 1f)
             
-            // Mirror X for front camera natural feel
             normalizedX = 1f - normalizedX
             
-            // Apply EMA smoothing
             smoothedX = smoothingAlpha * normalizedX + (1 - smoothingAlpha) * smoothedX
             smoothedY = smoothingAlpha * normalizedY + (1 - smoothingAlpha) * smoothedY
             
-            // Update cursor position
             cursorX = smoothedX
             cursorY = smoothedY
             
-            // Update overlay
             updateCursorOverlay(smoothedX, smoothedY)
-            
-            // Notify position update
             onPositionUpdate?.invoke(smoothedX, smoothedY)
             
-            // Detect gestures
-            if (thumbTip != null && thumbTip.inFrameLikelihood > 1.5f) {
+            if (thumbTip != null && thumbTip.inFrameLikelihood > 0.5f) {
                 detectGestures(indexTip, thumbTip)
             }
             
@@ -396,12 +372,10 @@ class CameraForegroundService : LifecycleService() {
         if (now - lastGestureTime < gestureDebounceMs) return
         
         try {
-            // Calculate pinch distance
             val dx = indexTip.position.x - thumbTip.position.x
             val dy = indexTip.position.y - thumbTip.position.y
             val distance = sqrt((dx * dx + dy * dy).toDouble()).toFloat()
             
-            // Pinch threshold
             val pinchThreshold = 50f
             
             if (distance < pinchThreshold) {
@@ -410,7 +384,6 @@ class CameraForegroundService : LifecycleService() {
                     currentGesture = "pinch"
                     onGestureDetected?.invoke("pinch")
                     
-                    // Perform click
                     if (now - lastClickTime > clickDebounceMs) {
                         lastClickTime = now
                         performClick()
@@ -442,15 +415,11 @@ class CameraForegroundService : LifecycleService() {
         }
     }
     
-    // ==========================================
-    // CURSOR OVERLAY
-    // ==========================================
-    
     private fun showCursorOverlay() {
         if (isOverlayVisible) return
         
         try {
-            windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+            windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             
             cursorView = ImageView(this)
             val cursorDrawable = createCursorDrawable()
@@ -459,7 +428,7 @@ class CameraForegroundService : LifecycleService() {
                 View.MeasureSpec.makeMeasureSpec(56, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(56, View.MeasureSpec.EXACTLY)
             )
-            cursorView?.layout(1, 1, 56, 56)
+            cursorView?.layout(0, 0, 56, 56)
             
             val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -513,7 +482,7 @@ class CameraForegroundService : LifecycleService() {
         
         handler.post {
             try {
-                cursorParams?.x = screenX - 4  // Offset for cursor tip
+                cursorParams?.x = screenX - 4
                 cursorParams?.y = screenY - 4
                 windowManager?.updateViewLayout(cursorView, cursorParams)
             } catch (e: Exception) {
@@ -527,7 +496,6 @@ class CameraForegroundService : LifecycleService() {
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         
-        // Mouse pointer arrow
         val path = Path().apply {
             moveTo(2f, 2f)
             lineTo(2f, 32f)
@@ -539,7 +507,6 @@ class CameraForegroundService : LifecycleService() {
             close()
         }
         
-        // Shadow
         val shadowPaint = Paint().apply {
             isAntiAlias = true
             color = Color.parseColor("#88000000")
@@ -550,7 +517,6 @@ class CameraForegroundService : LifecycleService() {
         canvas.drawPath(path, shadowPaint)
         canvas.restore()
         
-        // White fill
         val fillPaint = Paint().apply {
             isAntiAlias = true
             color = Color.WHITE
@@ -558,7 +524,6 @@ class CameraForegroundService : LifecycleService() {
         }
         canvas.drawPath(path, fillPaint)
         
-        // Black outline
         val outlinePaint = Paint().apply {
             isAntiAlias = true
             color = Color.BLACK
@@ -573,6 +538,8 @@ class CameraForegroundService : LifecycleService() {
     
     override fun onDestroy() {
         Log.d(TAG, "CameraForegroundService onDestroy")
+        
+        lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
         
         isRunning = false
         instance = null

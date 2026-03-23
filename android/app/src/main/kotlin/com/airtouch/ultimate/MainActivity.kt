@@ -1,5 +1,6 @@
 package com.airtouch.ultimate
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -9,17 +10,14 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.View
-import android.widget.Toast
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
 /**
  * AirTouch Ultimate - MainActivity
- * 
- * Main entry point for the Flutter application.
- * Handles all communication between Flutter and native Android.
  */
 class MainActivity : FlutterActivity() {
     
@@ -34,13 +32,10 @@ class MainActivity : FlutterActivity() {
     
     private val handler = Handler(Looper.getMainLooper())
     private var eventSink: EventChannel.EventSink? = null
-    private var isServiceRunning = false
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         instance = this
-        
-        // Hide navigation bar for immersive experience
         hideSystemUI()
     }
     
@@ -59,13 +54,11 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         Log.d(TAG, "Configuring Flutter Engine")
         
-        // Set up method channel
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, METHOD_CHANNEL)
             .setMethodCallHandler { call, result ->
                 handleMethodCall(call, result)
             }
         
-        // Set up event channel
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, EVENT_CHANNEL)
             .setStreamHandler(object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -79,7 +72,6 @@ class MainActivity : FlutterActivity() {
                 }
             })
         
-        // Set up callbacks from CameraForegroundService
         CameraForegroundService.onPositionUpdate = { x, y ->
             sendPositionEvent(x, y)
         }
@@ -91,7 +83,7 @@ class MainActivity : FlutterActivity() {
         Log.d(TAG, "Flutter engine configured successfully")
     }
     
-    private fun handleMethodCall(call: MethodChannel.MethodCall, result: MethodChannel.Result) {
+    private fun handleMethodCall(call: MethodCall, result: MethodChannel.Result) {
         Log.d(TAG, "Method call: ${call.method}")
         
         try {
@@ -147,7 +139,7 @@ class MainActivity : FlutterActivity() {
                 }
                 
                 "isServiceRunning" -> {
-                    result.success(isServiceRunning)
+                    result.success(CameraForegroundService.isRunning)
                 }
                 
                 else -> {
@@ -172,8 +164,6 @@ class MainActivity : FlutterActivity() {
                 startService(intent)
             }
             
-            isServiceRunning = true
-            
         } catch (e: Exception) {
             Log.e(TAG, "Error starting camera service: ${e.message}")
         }
@@ -185,8 +175,6 @@ class MainActivity : FlutterActivity() {
         try {
             val intent = Intent(this, CameraForegroundService::class.java)
             stopService(intent)
-            
-            isServiceRunning = false
             
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping camera service: ${e.message}")
@@ -239,7 +227,6 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         Log.d(TAG, "MainActivity onDestroy")
         
-        // Clean up callbacks
         CameraForegroundService.onPositionUpdate = null
         CameraForegroundService.onGestureDetected = null
         

@@ -68,10 +68,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   double _cursorX = 0.5;
   double _cursorY = 0.5;
   String _gesture = 'none';
-  double _fps = 0;
   
   StreamSubscription<dynamic>? _eventSubscription;
-  EventChannel.EventSink? _eventSink;
 
   @override
   void initState() {
@@ -89,7 +87,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         if (type == 'position') {
           setState(() {
             _cursorX = (event['x'] as num?)?.toDouble() ?? 0.5;
-            _cursorY = (event['y'] as num?)?.toDouble() ?? 1.5;
+            _cursorY = (event['y'] as num?)?.toDouble() ?? 0.5;
           });
         } else if (type == 'gesture') {
           setState(() {
@@ -97,6 +95,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           });
         }
       }
+    }, onError: (error) {
+      debugPrint('Event channel error: $error');
     });
   }
   
@@ -400,11 +400,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('FPS: ${_fps.toStringAsFixed(0)}', style: const TextStyle(color: Colors.white, fontSize: 14)),
+                  Text('Gesture: ${_gesture.toUpperCase()}', style: TextStyle(color: _gesture == 'pinch' ? Colors.green : Colors.white, fontSize: 14)),
                   const SizedBox(height: 4),
-                  Text('Gesture: ${_gesture.toUpperCase()}', style: TextStyle(color: _gesture == 'pinch' ? Colors.green : Colors.white, fontSize: 12)),
-                  const SizedBox(height: 4),
-                  Text('X: ${(_cursorX * 100).toStringAsFixed(0)}%  Y: ${(_cursorY * 100).toStringAsFixed(0)}%', style: const TextStyle(color: Colors.white70, fontSize: 10)),
+                  Text('X: ${(_cursorX * 100).toStringAsFixed(0)}%  Y: ${(_cursorY * 100).toStringAsFixed(0)}%', style: const TextStyle(color: Colors.white70, fontSize: 12)),
                 ],
               ),
             ),
